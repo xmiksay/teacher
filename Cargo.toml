@@ -1,0 +1,36 @@
+[package]
+name = "teacher_server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "teacher_server"
+path = "src/bin/teacher_server.rs"
+
+[[bin]]
+name = "teacher_cli"
+path = "src/bin/teacher_cli.rs"
+
+[[bin]]
+name = "teacher_migration"
+path = "src/bin/teacher_migration.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sea-orm = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+sea-orm-migration = "1"
+reqwest = { version = "0.12", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+dotenvy = "0.15"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+argon2 = "0.5"
+rand = "0.9"
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
