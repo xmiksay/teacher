@@ -76,7 +76,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/profiles", get(api::profile::list_profiles).post(api::profile::create_profile))
         .route("/api/profiles/{id}", get(api::profile::get_profile).put(api::profile::update_profile).delete(api::profile::delete_profile))
         // Weak points
+        .route("/api/weak-points", post(api::weak_points::create_weak_point))
         .route("/api/weak-points/{profile_id}", get(api::weak_points::list_weak_points))
+        .route("/api/weak-points/{id}/delete", delete(api::weak_points::delete_weak_point))
         // Vocabulary
         .route("/api/vocab", post(api::vocab::create_vocab))
         .route("/api/vocab/lesson/{lesson_id}", get(api::vocab::list_lesson_vocab))

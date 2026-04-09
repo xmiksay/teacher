@@ -298,6 +298,23 @@ struct ToolCall {
     input: serde_json::Value,
 }
 
+/// Strip `<think>...</think>` blocks that reasoning models (Qwen, DeepSeek) emit.
+fn strip_think_blocks(text: &str) -> String {
+    let mut result = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<think>") {
+        result.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find("</think>") {
+            rest = &rest[start + end + "</think>".len()..];
+        } else {
+            // Unclosed <think> — strip everything after it
+            return result.trim().to_string();
+        }
+    }
+    result.push_str(rest);
+    result.trim().to_string()
+}
+
 struct LlmResponse {
     text_parts: Vec<String>,
     tool_calls: Vec<ToolCall>,
@@ -330,6 +347,8 @@ async fn call_llm_with_tools(
         };
 
         if !resp.tool_calls.is_empty() {
+            tracing::info!("LLM returned {} tool call(s): {}", resp.tool_calls.len(),
+                resp.tool_calls.iter().map(|tc| tc.name.as_str()).collect::<Vec<_>>().join(", "));
             // Execute each tool and collect results
             let mut results = Vec::new();
             for tc in &resp.tool_calls {
@@ -394,6 +413,7 @@ async fn call_llm_with_tools(
         }
 
         // No tool calls — return text if we have any
+        tracing::debug!("LLM returned text only, no tool calls");
         let text = resp.text_parts.join("\n");
         if text.is_empty() {
             // LLM ended without producing text — nudge it to respond
@@ -407,8 +427,136 @@ async fn call_llm_with_tools(
             }));
             continue;
         }
+
+        // Fallback for Ollama models that describe tool actions in text
+        // instead of making actual tool calls: ask the LLM to extract
+        // vocabulary and weak points from its own response.
+        if matches!(state.llm, LlmProvider::Ollama { .. }) {
+            let fallback_tools = extract_tools_from_text(state, &text, profile_id, lesson_id).await;
+            if !fallback_tools.is_empty() {
+                tracing::info!("Fallback tool extraction found {} tool call(s)", fallback_tools.len());
+                for (tool_name, input) in &fallback_tools {
+                    match execute_tool(state, tool_name, input, profile_id, lesson_id, mcp_base_url).await {
+                        Ok(v) => tracing::info!("Fallback tool '{tool_name}' succeeded: {v}"),
+                        Err(e) => tracing::error!("Fallback tool '{tool_name}' failed: {e}"),
+                    }
+                }
+            }
+        }
+
         return Ok(text);
     }
+}
+
+/// Fallback: parse the LLM's text response to extract vocabulary words it
+/// mentioned but didn't call tools for.  Uses a second, focused LLM request
+/// that asks *only* for tool calls.
+async fn extract_tools_from_text(
+    state: &AppState,
+    assistant_text: &str,
+    _profile_id: Uuid,
+    _lesson_id: Option<Uuid>,
+) -> Vec<(String, serde_json::Value)> {
+    let LlmProvider::Ollama { base_url, model } = &state.llm else {
+        return vec![];
+    };
+
+    let extraction_prompt = format!(
+        r#"You are a tool-calling assistant. The following is a language tutor's response to a student.
+Extract ALL vocabulary words that the tutor mentioned, taught, or added in this response.
+For each word, call add_vocabulary with the word and its translation.
+Also call add_weak_point for any grammar issues identified.
+
+IMPORTANT: You MUST respond ONLY with tool calls. Do NOT output any text.
+
+Tutor's response:
+{assistant_text}"#
+    );
+
+    let tools = serde_json::json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "add_vocabulary",
+                "description": "Add a word to vocabulary",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "word": {"type": "string"},
+                        "translation": {"type": "string"},
+                        "context": {"type": "string"}
+                    },
+                    "required": ["word", "translation"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_weak_point",
+                "description": "Record a grammar weak point",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["grammar", "vocabulary", "phrase"]},
+                        "detail": {"type": "string"}
+                    },
+                    "required": ["type", "detail"]
+                }
+            }
+        }
+    ]);
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a tool-calling assistant. Respond ONLY with tool calls, never with text."},
+            {"role": "user", "content": extraction_prompt}
+        ],
+        "tools": tools,
+        "stream": false,
+    });
+
+    let resp = match state.http_client
+        .post(format!("{base_url}/api/chat"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Fallback extraction request failed: {e}");
+            return vec![];
+        }
+    };
+
+    let resp_body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Fallback extraction response parse failed: {e}");
+            return vec![];
+        }
+    };
+
+    tracing::debug!("Fallback extraction response: {resp_body}");
+
+    let mut results = vec![];
+    if let Some(tcs) = resp_body["message"]["tool_calls"].as_array() {
+        for tc in tcs {
+            let name = tc["function"]["name"].as_str().unwrap_or("");
+            if name.is_empty() { continue; }
+            let args = if tc["function"]["arguments"].is_object() {
+                tc["function"]["arguments"].clone()
+            } else if let Some(s) = tc["function"]["arguments"].as_str() {
+                serde_json::from_str(s).unwrap_or_default()
+            } else {
+                continue;
+            };
+            results.push((name.to_string(), args));
+        }
+    }
+
+    results
 }
 
 async fn send_claude_request(
@@ -422,11 +570,31 @@ async fn send_claude_request(
         unreachable!()
     };
 
+    // Inject a tool-use reminder before the last user message so Claude doesn't
+    // lose track of tools in long, text-only conversation histories.
+    let mut messages = conversation.to_vec();
+    if messages.len() > 2 {
+        // Insert a reminder as a "user" turn just before the final user message
+        let reminder = serde_json::json!({
+            "role": "user",
+            "content": "REMINDER: You have tools available (add_vocabulary, bump_vocabulary, add_weak_point, resolve_weak_point, set_topic_preference). When teaching new words, you MUST call add_vocabulary for each word. When the student makes a grammar mistake, call add_weak_point. Do NOT just describe actions in text — execute them with the tools."
+        });
+        // Find the last user message and insert reminder before it
+        if let Some(pos) = messages.iter().rposition(|m| m["role"] == "user") {
+            messages.insert(pos, reminder.clone());
+            // The API requires alternating user/assistant, so wrap with an assistant ack
+            messages.insert(pos + 1, serde_json::json!({
+                "role": "assistant",
+                "content": "Understood, I will use the tools."
+            }));
+        }
+    }
+
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 4096,
         "system": system_prompt,
-        "messages": conversation,
+        "messages": messages,
         "tools": tools,
     });
 
@@ -519,7 +687,6 @@ async fn send_ollama_request(
         "messages": messages,
         "tools": openai_tools,
         "stream": false,
-        "think": false,
     });
 
     tracing::debug!("Ollama request to {base_url}/api/chat model={model} body={body}");
@@ -548,7 +715,9 @@ async fn send_ollama_request(
         anyhow::bail!("Ollama response missing message field");
     }
 
-    let text_content = message["content"].as_str().unwrap_or("").to_string();
+    // Strip <think>...</think> blocks that Qwen/reasoning models emit
+    let raw_content = message["content"].as_str().unwrap_or("");
+    let text_content = strip_think_blocks(raw_content);
 
     let mut text_parts = Vec::new();
     if !text_content.is_empty() {

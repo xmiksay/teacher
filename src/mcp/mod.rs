@@ -88,6 +88,7 @@ pub struct AddVocabularyInput {
     pub word: String,
     pub translation: String,
     pub context: Option<String>,
+    pub lesson_id: Option<Uuid>,
 }
 
 pub async fn add_vocabulary(
@@ -104,7 +105,7 @@ pub async fn add_vocabulary(
         context: Set(input.context),
         last_practiced: Set(chrono::Utc::now().into()),
         error_count: Set(0),
-        lesson_id: Set(None),
+        lesson_id: Set(input.lesson_id),
     };
 
     model
