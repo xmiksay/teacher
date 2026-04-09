@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useAuthStore } from './auth'
+
+const LAST_PROFILE_KEY = 'teacher_last_profile_id'
 
 export interface Profile {
   id: string
@@ -9,6 +11,7 @@ export interface Profile {
   level: string
   style: string
   explanation_language: string
+  personal_note: string
 }
 
 export const useProfileStore = defineStore('profile', () => {
@@ -22,7 +25,9 @@ export const useProfileStore = defineStore('profile', () => {
     })
     profiles.value = await resp.json()
     if (profiles.value.length > 0 && !current.value) {
-      current.value = profiles.value[0]
+      const lastId = localStorage.getItem(LAST_PROFILE_KEY)
+      const saved = lastId ? profiles.value.find((p) => p.id === lastId) : null
+      current.value = saved ?? profiles.value[0]
     }
   }
 
@@ -46,7 +51,7 @@ export const useProfileStore = defineStore('profile', () => {
 
   async function updateProfile(
     id: string,
-    data: { level?: string; style?: string; explanation_language?: string }
+    data: { level?: string; style?: string; explanation_language?: string; personal_note?: string }
   ) {
     const auth = useAuthStore()
     const resp = await fetch(`/api/profiles/${id}`, {
@@ -61,5 +66,28 @@ export const useProfileStore = defineStore('profile', () => {
     return updated
   }
 
-  return { profiles, current, loadProfiles, createProfile, updateProfile }
+  async function deleteProfile(id: string) {
+    const auth = useAuthStore()
+    const resp = await fetch(`/api/profiles/${id}`, {
+      method: 'DELETE',
+      headers: auth.authHeaders(),
+    })
+
+    if (resp.ok) {
+      profiles.value = profiles.value.filter((p) => p.id !== id)
+      if (current.value?.id === id) {
+        current.value = profiles.value.length > 0 ? profiles.value[0] : null
+      }
+    }
+  }
+
+  watch(current, (profile) => {
+    if (profile) {
+      localStorage.setItem(LAST_PROFILE_KEY, profile.id)
+    } else {
+      localStorage.removeItem(LAST_PROFILE_KEY)
+    }
+  })
+
+  return { profiles, current, loadProfiles, createProfile, updateProfile, deleteProfile }
 })

@@ -55,15 +55,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/lessons", post(api::lesson_history::create_lesson))
         .route("/api/lessons/{id}/detail", get(api::lesson_history::get_lesson))
         .route("/api/lessons/{id}/delete", delete(api::lesson_history::delete_lesson))
+        .route("/api/lessons/{lesson_id}/messages/{message_id}", delete(api::lesson_history::delete_message))
         // Profiles
         .route("/api/profiles", get(api::profile::list_profiles).post(api::profile::create_profile))
-        .route("/api/profiles/{id}", get(api::profile::get_profile).put(api::profile::update_profile))
+        .route("/api/profiles/{id}", get(api::profile::get_profile).put(api::profile::update_profile).delete(api::profile::delete_profile))
         // Weak points
         .route("/api/weak-points/{profile_id}", get(api::weak_points::list_weak_points))
         // Vocabulary
         .route("/api/vocab", post(api::vocab::create_vocab))
         .route("/api/vocab/{profile_id}", get(api::vocab::list_vocab))
         .route("/api/vocab/{id}/delete", delete(api::vocab::delete_vocab))
+        .route("/api/vocab/{profile_id}/delete-all", delete(api::vocab::delete_all_vocab))
         // MCP endpoints (for direct access / testing)
         .route("/mcp/profile/{profile_id}", get(mcp::get_profile))
         .route("/mcp/vocabulary/{profile_id}", post(mcp::add_vocabulary))

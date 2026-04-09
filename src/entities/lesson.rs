@@ -8,8 +8,6 @@ pub struct Model {
     pub id: Uuid,
     pub profile_id: Uuid,
     pub title: String,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub messages: serde_json::Value,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }
@@ -22,11 +20,19 @@ pub enum Relation {
         to = "super::user_language_profile::Column::Id"
     )]
     Profile,
+    #[sea_orm(has_many = "super::lesson_message::Entity")]
+    Messages,
 }
 
 impl Related<super::user_language_profile::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Profile.def()
+    }
+}
+
+impl Related<super::lesson_message::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Messages.def()
     }
 }
 

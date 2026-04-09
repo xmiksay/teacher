@@ -48,11 +48,21 @@ export const useVocabStore = defineStore('vocab', () => {
     words.value = words.value.filter((w) => w.id !== id)
   }
 
+  async function deleteAll(profileId: string) {
+    const auth = useAuthStore()
+    await fetch(`/api/vocab/${profileId}/delete-all`, {
+      method: 'DELETE',
+      headers: { ...auth.authHeaders() },
+    })
+    words.value = []
+    flashcardIndex.value = 0
+  }
+
   function nextFlashcard() {
     if (words.value.length > 0) {
       flashcardIndex.value = (flashcardIndex.value + 1) % words.value.length
     }
   }
 
-  return { words, flashcardIndex, loadVocab, addWord, deleteWord, nextFlashcard }
+  return { words, flashcardIndex, loadVocab, addWord, deleteWord, deleteAll, nextFlashcard }
 })

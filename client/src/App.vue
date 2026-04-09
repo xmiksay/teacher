@@ -3,14 +3,17 @@ import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import { useProfileStore } from './stores/profile'
+import { useLessonStore } from './stores/lesson'
 
 const authStore = useAuthStore()
 const profileStore = useProfileStore()
+const lessonStore = useLessonStore()
 const router = useRouter()
 
 onMounted(async () => {
   if (authStore.isLoggedIn) {
     await profileStore.loadProfiles()
+    await lessonStore.restoreLastLesson()
   }
 })
 

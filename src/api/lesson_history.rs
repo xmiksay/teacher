@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::AuthUser;
-use crate::entities::{lesson, user_language_profile};
+use crate::entities::{lesson, lesson_message, user_language_profile};
 
 #[derive(Serialize)]
 pub struct LessonSummary {
@@ -26,9 +26,17 @@ pub struct LessonDetail {
     pub id: Uuid,
     pub profile_id: Uuid,
     pub title: String,
-    pub messages: serde_json::Value,
+    pub messages: Vec<MessageDetail>,
     pub created_at: chrono::DateTime<chrono::FixedOffset>,
     pub updated_at: chrono::DateTime<chrono::FixedOffset>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct MessageDetail {
+    pub id: Uuid,
+    pub role: String,
+    pub content: String,
+    pub created_at: chrono::DateTime<chrono::FixedOffset>,
 }
 
 #[derive(Deserialize)]
@@ -55,24 +63,24 @@ pub async fn list_lessons(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let summaries = lessons
-        .into_iter()
-        .map(|l| {
-            let message_count = l
-                .messages
-                .as_array()
-                .map(|a| a.len())
-                .unwrap_or(0);
-            LessonSummary {
-                id: l.id,
-                profile_id: l.profile_id,
-                title: l.title,
-                created_at: l.created_at,
-                updated_at: l.updated_at,
-                message_count,
-            }
-        })
-        .collect();
+    let mut summaries = Vec::new();
+    for l in lessons {
+        let message_count = lesson_message::Entity::find()
+            .filter(lesson_message::Column::LessonId.eq(l.id))
+            .all(&state.db)
+            .await
+            .map(|msgs| msgs.len())
+            .unwrap_or(0);
+
+        summaries.push(LessonSummary {
+            id: l.id,
+            profile_id: l.profile_id,
+            title: l.title,
+            created_at: l.created_at,
+            updated_at: l.updated_at,
+            message_count,
+        });
+    }
 
     Ok(Json(summaries))
 }
@@ -96,7 +104,6 @@ pub async fn create_lesson(
         id: Set(id),
         profile_id: Set(input.profile_id),
         title: Set("New lesson".to_string()),
-        messages: Set(serde_json::json!([])),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -110,7 +117,7 @@ pub async fn create_lesson(
         id: lesson.id,
         profile_id: lesson.profile_id,
         title: lesson.title,
-        messages: lesson.messages,
+        messages: vec![],
         created_at: lesson.created_at,
         updated_at: lesson.updated_at,
     }))
@@ -127,11 +134,28 @@ pub async fn get_lesson(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Lesson not found".to_string()))?;
 
+    let messages = lesson_message::Entity::find()
+        .filter(lesson_message::Column::LessonId.eq(lesson.id))
+        .order_by_asc(lesson_message::Column::CreatedAt)
+        .all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let message_details: Vec<MessageDetail> = messages
+        .into_iter()
+        .map(|m| MessageDetail {
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            created_at: m.created_at,
+        })
+        .collect();
+
     Ok(Json(LessonDetail {
         id: lesson.id,
         profile_id: lesson.profile_id,
         title: lesson.title,
-        messages: lesson.messages,
+        messages: message_details,
         created_at: lesson.created_at,
         updated_at: lesson.updated_at,
     }))
@@ -149,6 +173,23 @@ pub async fn delete_lesson(
 
     if result.rows_affected == 0 {
         return Err((StatusCode::NOT_FOUND, "Lesson not found".to_string()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn delete_message(
+    _auth: AuthUser,
+    State(state): State<AppState>,
+    Path((_lesson_id, message_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let result = lesson_message::Entity::delete_by_id(message_id)
+        .exec(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected == 0 {
+        return Err((StatusCode::NOT_FOUND, "Message not found".to_string()));
     }
 
     Ok(StatusCode::NO_CONTENT)

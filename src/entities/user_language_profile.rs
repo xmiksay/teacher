@@ -11,6 +11,8 @@ pub struct Model {
     pub level: String,
     pub style: String,
     pub explanation_language: String,
+    #[sea_orm(column_type = "Text")]
+    pub personal_note: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

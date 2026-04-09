@@ -1,0 +1,162 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: teacher
+  namespace: services
+type: Opaque
+stringData:
+  ANTHROPIC_API_KEY: "sk-ant-fake-key-replace-me"
+  DATABASE_URL: "postgres://teacher:supersecretpassword@teacher-db:5432/teacher"
+  POSTGRES_PASSWORD: "supersecretpassword"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teacher-db
+  namespace: services
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: teacher-db
+  template:
+    metadata:
+      labels:
+        app: teacher-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: "teacher"
+            - name: POSTGRES_DB
+              value: "teacher"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: teacher
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: teacher-db
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: teacher-db
+  namespace: services
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teacher-db
+  namespace: services
+spec:
+  selector:
+    app: teacher-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teacher
+  namespace: services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: teacher
+  template:
+    metadata:
+      labels:
+        app: teacher
+    spec:
+      containers:
+        - name: teacher
+          image: ghcr.io/euroska/teacher:master
+          ports:
+            - containerPort: 3000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: teacher
+                  key: DATABASE_URL
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: teacher
+                  key: ANTHROPIC_API_KEY
+            - name: SELF_URL
+              value: "https://teacher.sourcelab.cz"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teacher
+  namespace: services
+spec:
+  selector:
+    app: teacher
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: teacher
+  namespace: services
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  tls:
+    - hosts:
+        - teacher.sourcelab.cz
+      secretName: teacher.sourcelab.cz
+  rules:
+    - host: teacher.sourcelab.cz
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: teacher
+                port:
+                  number: 3000

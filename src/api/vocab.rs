@@ -86,3 +86,17 @@ pub async fn delete_vocab(
 
     Ok(())
 }
+
+pub async fn delete_all_vocab(
+    _auth: AuthUser,
+    State(state): State<AppState>,
+    Path(profile_id): Path<Uuid>,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    vocabulary::Entity::delete_many()
+        .filter(vocabulary::Column::ProfileId.eq(profile_id))
+        .exec(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(())
+}

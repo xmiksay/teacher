@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, watch } from 'vue'
+import { ref, nextTick, watch, computed } from 'vue'
 import { marked } from 'marked'
 import { useLessonStore } from '../stores/lesson'
 import { useProfileStore } from '../stores/profile'
@@ -9,15 +9,36 @@ const profileStore = useProfileStore()
 
 const input = ref('')
 const chatContainer = ref<HTMLElement | null>(null)
+const textareaRef = ref<HTMLTextAreaElement | null>(null)
+
+const hasTTS = typeof window !== 'undefined' && 'speechSynthesis' in window
+const hasSTT = typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)
+
+const displayInput = computed(() => {
+  if (lessonStore.isRecording && lessonStore.interimTranscript) {
+    return input.value + (input.value ? ' ' : '') + lessonStore.interimTranscript
+  }
+  return input.value
+})
 
 function renderMarkdown(text: string): string {
   return marked.parse(text, { async: false }) as string
 }
 
-async function send() {
+function autoResize() {
+  const el = textareaRef.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 150) + 'px'
+}
+
+async function send(e?: Event) {
+  e?.preventDefault()
   const text = input.value.trim()
   if (!text || lessonStore.loading) return
   input.value = ''
+  await nextTick()
+  autoResize()
   await lessonStore.sendMessage(text)
   await nextTick()
   chatContainer.value?.scrollTo({ top: chatContainer.value.scrollHeight, behavior: 'smooth' })
@@ -25,6 +46,23 @@ async function send() {
 
 async function newLesson() {
   await lessonStore.startNewLesson()
+}
+
+function deleteMessage(messageId: string) {
+  const lessonId = lessonStore.currentLessonId
+  const profileId = profileStore.current?.id
+  if (!lessonId || !profileId) return
+  lessonStore.deleteMessage(lessonId, messageId, profileId)
+}
+
+function toggleRecording() {
+  if (lessonStore.isRecording) {
+    lessonStore.stopRecording()
+  } else {
+    lessonStore.startRecording((text) => {
+      input.value += (input.value ? ' ' : '') + text
+    })
+  }
 }
 
 // Ensure conversation exists when profile changes
@@ -61,6 +99,14 @@ watch(
         >
           New lesson
         </button>
+        <label class="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            v-model="lessonStore.loopMode"
+            class="rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
+          />
+          Loop mode
+        </label>
       </div>
 
       <!-- Chat messages -->
@@ -71,19 +117,47 @@ watch(
 
         <div
           v-for="(msg, i) in lessonStore.currentMessages"
-          :key="i"
+          :key="msg.id ?? i"
           :class="[
-            'max-w-[80%] rounded-lg px-4 py-3',
+            'max-w-[80%] rounded-lg px-4 py-3 group relative',
             msg.role === 'user'
               ? 'ml-auto bg-blue-600 text-white'
               : 'mr-auto bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700'
           ]"
         >
-          <div
-            v-if="msg.role === 'assistant'"
-            class="prose dark:prose-invert prose-sm max-w-none"
-            v-html="renderMarkdown(msg.content)"
-          />
+          <!-- Delete message button -->
+          <button
+            v-if="msg.id && lessonStore.currentLessonId"
+            @click="deleteMessage(msg.id)"
+            class="absolute -top-2 opacity-0 group-hover:opacity-100 transition-opacity bg-white dark:bg-gray-700 rounded-full p-0.5 shadow text-gray-400 hover:text-red-500"
+            :class="msg.role === 'user' ? '-left-2' : '-right-2'"
+            title="Delete message"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          <div v-if="msg.role === 'assistant'">
+            <div
+              class="prose dark:prose-invert prose-sm max-w-none"
+              v-html="renderMarkdown(msg.content)"
+            />
+            <button
+              v-if="hasTTS"
+              @click="lessonStore.speakMessage(i)"
+              class="mt-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-xs flex items-center gap-1"
+              :title="lessonStore.speakingMessageIndex === i ? 'Stop' : 'Listen'"
+            >
+              <svg v-if="lessonStore.speakingMessageIndex !== i" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072M17.95 6.05a8 8 0 010 11.9M11 5L6 9H2v6h4l5 4V5z" />
+              </svg>
+              <svg v-else xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10h6v4H9z" />
+              </svg>
+              <span>{{ lessonStore.speakingMessageIndex === i ? 'Stop' : 'Listen' }}</span>
+            </button>
+          </div>
           <p v-else class="whitespace-pre-wrap">{{ msg.content }}</p>
         </div>
 
@@ -95,13 +169,33 @@ watch(
       <!-- Input -->
       <div class="border-t border-gray-200 dark:border-gray-700 p-4 bg-white dark:bg-gray-800">
         <form @submit.prevent="send" class="flex gap-2">
-          <input
+          <textarea
+            ref="textareaRef"
             v-model="input"
-            type="text"
-            placeholder="Type your message..."
-            class="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            :placeholder="lessonStore.isRecording ? displayInput || 'Listening...' : 'Type your message...'"
+            class="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none overflow-hidden"
+            :class="{ 'ring-2 ring-red-400': lessonStore.isRecording }"
             :disabled="lessonStore.loading"
+            rows="1"
+            @input="autoResize"
+            @keydown.enter.exact="send"
           />
+          <button
+            v-if="hasSTT"
+            type="button"
+            @click="toggleRecording"
+            class="rounded-lg px-3 py-2 text-sm font-medium transition-colors"
+            :class="lessonStore.isRecording
+              ? 'bg-red-500 text-white hover:bg-red-600 animate-pulse'
+              : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'"
+            :disabled="lessonStore.loading"
+            :title="lessonStore.isRecording ? 'Stop recording' : 'Start recording'"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path v-if="!lessonStore.isRecording" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
+              <path v-else stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /><path v-if="lessonStore.isRecording" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10h6v4H9z" />
+            </svg>
+          </button>
           <button
             type="submit"
             class="rounded-lg bg-blue-600 px-6 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"

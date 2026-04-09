@@ -8,13 +8,14 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::AuthUser;
-use crate::entities::{lesson, user_language_profile, vocabulary, weak_point};
+use crate::entities::{lesson, lesson_message, user_language_profile, vocabulary, weak_point};
 
 #[derive(Deserialize)]
 pub struct LessonRequest {
     pub profile_id: Uuid,
     pub lesson_id: Option<Uuid>,
     pub messages: Vec<Message>,
+    pub loop_mode: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -119,11 +120,20 @@ pub async fn chat(
         }
     ]);
 
-    let api_messages: Vec<serde_json::Value> = input
+    let all_api_messages: Vec<serde_json::Value> = input
         .messages
         .iter()
         .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
         .collect();
+
+    // Loop mode: send only first message + last 3 to save tokens
+    let api_messages = if input.loop_mode.unwrap_or(false) && all_api_messages.len() > 4 {
+        let mut trimmed = vec![all_api_messages[0].clone()];
+        trimmed.extend_from_slice(&all_api_messages[all_api_messages.len() - 3..]);
+        trimmed
+    } else {
+        all_api_messages
+    };
 
     let reply = call_claude_with_tools(
         &state,
@@ -136,39 +146,54 @@ pub async fn chat(
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Persist conversation to lesson
-    if let Some(lesson_id) = input.lesson_id {
-        let mut all_messages = input.messages.clone();
-        all_messages.push(Message {
-            role: "assistant".to_string(),
-            content: reply.clone(),
-        });
+    // Persist conversation to lesson (skip empty replies)
+    if let Some(lesson_id) = input.lesson_id && !reply.trim().is_empty() {
+        let now = chrono::Utc::now().fixed_offset();
 
-        let messages_json = serde_json::to_value(&all_messages)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // Insert the user's last message and the assistant reply as lesson_message rows
+        if let Some(user_msg) = input.messages.last() {
+            use sea_orm::ActiveModelTrait;
+
+            let user_row = lesson_message::ActiveModel {
+                id: sea_orm::Set(Uuid::new_v4()),
+                lesson_id: sea_orm::Set(lesson_id),
+                role: sea_orm::Set(user_msg.role.clone()),
+                content: sea_orm::Set(user_msg.content.clone()),
+                created_at: sea_orm::Set(now),
+            };
+            let _ = user_row.insert(&state.db).await;
+
+            let assistant_row = lesson_message::ActiveModel {
+                id: sea_orm::Set(Uuid::new_v4()),
+                lesson_id: sea_orm::Set(lesson_id),
+                role: sea_orm::Set("assistant".to_string()),
+                content: sea_orm::Set(reply.clone()),
+                created_at: sea_orm::Set(now + chrono::Duration::milliseconds(1)),
+            };
+            let _ = assistant_row.insert(&state.db).await;
+        }
 
         // Generate title from first user message if this is the first exchange
-        let title = if input.messages.len() <= 1 {
-            input
+        if input.messages.len() <= 1 {
+            let title = input
                 .messages
                 .first()
                 .map(|m| {
                     let t = m.content.chars().take(60).collect::<String>();
                     if m.content.len() > 60 { format!("{t}...") } else { t }
                 })
-                .unwrap_or_else(|| "New lesson".to_string())
-        } else {
-            // Don't update title for subsequent messages
-            String::new()
-        };
+                .unwrap_or_else(|| "New lesson".to_string());
 
-        if let Ok(Some(existing)) = lesson::Entity::find_by_id(lesson_id).one(&state.db).await {
-            let mut active: lesson::ActiveModel = existing.into();
-            active.messages = sea_orm::Set(messages_json);
-            active.updated_at = sea_orm::Set(chrono::Utc::now().fixed_offset());
-            if !title.is_empty() {
+            if let Ok(Some(existing)) = lesson::Entity::find_by_id(lesson_id).one(&state.db).await {
+                let mut active: lesson::ActiveModel = existing.into();
                 active.title = sea_orm::Set(title);
+                active.updated_at = sea_orm::Set(now);
+                use sea_orm::ActiveModelTrait;
+                let _ = active.update(&state.db).await;
             }
+        } else if let Ok(Some(existing)) = lesson::Entity::find_by_id(lesson_id).one(&state.db).await {
+            let mut active: lesson::ActiveModel = existing.into();
+            active.updated_at = sea_orm::Set(now);
             use sea_orm::ActiveModelTrait;
             let _ = active.update(&state.db).await;
         }
@@ -207,13 +232,22 @@ fn build_system_prompt(
             .join("\n")
     };
 
+    let personal_note_section = if profile.personal_note.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n## Student's Personal Learning Preferences\n{}\n",
+            profile.personal_note
+        )
+    };
+
     format!(
         r#"You are a language tutor for {target_language}.
 
 Student level: {level}
 Explanation language: {explanation_language}
 Tutor style: {style}
-
+{personal_note_section}
 ## Weak Points
 {wp_list}
 
@@ -221,6 +255,7 @@ Tutor style: {style}
 {vocab_list}
 
 ## Instructions
+- NEVER reply with an empty message. Always provide meaningful content in every response.
 - Conduct the lesson naturally in {target_language}, adjusting complexity to {level} level.
 - When the student makes a mistake, correct it inline using this format:
   **Original:** <what they said>
@@ -228,13 +263,16 @@ Tutor style: {style}
   **Mistakes:**
   1. `<wrong>` → `<right>` — <brief explanation>
 - Subtly incorporate weak points into the conversation to help the student practice them.
-- Use the tools silently to track vocabulary and weak points — do not mention the tools to the student.
+- When you add a new word to the student's vocabulary, briefly mention the word and its translation to the student so they know it was saved.
+- Use the other tools (bump_vocabulary, add_weak_point, resolve_weak_point, set_topic_preference) silently — do not mention them to the student.
+- You MUST always include a text response to the student. Never respond with only tool calls and no text.
 - When explaining grammar or vocabulary, use {explanation_language}.
 - Match the {style} tutor personality throughout."#,
         target_language = profile.language,
         level = profile.level,
         explanation_language = profile.explanation_language,
         style = profile.style,
+        personal_note_section = personal_note_section,
         wp_list = wp_list,
         vocab_list = vocab_list,
     )
@@ -278,7 +316,7 @@ async fn call_claude_with_tools(
             anyhow::bail!("Claude API error {}: {}", status, resp_body);
         }
 
-        let stop_reason = resp_body["stop_reason"].as_str().unwrap_or("");
+        let _stop_reason = resp_body["stop_reason"].as_str().unwrap_or("");
         let content = resp_body["content"].as_array().ok_or_else(|| anyhow::anyhow!("No content in response"))?;
 
         // Collect text parts and tool_use parts
@@ -299,7 +337,7 @@ async fn call_claude_with_tools(
             }
         }
 
-        if stop_reason == "tool_use" && !tool_uses.is_empty() {
+        if !tool_uses.is_empty() {
             // Add assistant message with the full content
             conversation.push(serde_json::json!({
                 "role": "assistant",
@@ -333,8 +371,21 @@ async fn call_claude_with_tools(
             continue;
         }
 
-        // No more tool calls — return the text
-        return Ok(text_parts.join("\n"));
+        // No more tool calls — return the text if we have any
+        let text = text_parts.join("\n");
+        if text.is_empty() {
+            // Claude ended without producing text — nudge it to respond
+            conversation.push(serde_json::json!({
+                "role": "assistant",
+                "content": content,
+            }));
+            conversation.push(serde_json::json!({
+                "role": "user",
+                "content": "Continue.",
+            }));
+            continue;
+        }
+        return Ok(text);
     }
 }
 
