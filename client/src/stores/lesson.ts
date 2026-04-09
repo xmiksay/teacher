@@ -285,9 +285,6 @@ export const useLessonStore = defineStore('lesson', () => {
           }))
         }
 
-        // Reload lesson vocabulary (may have been added by Claude tools)
-        const vocabStore = useVocabStore()
-        await vocabStore.loadLessonVocab(conv.lessonId)
       }
     } catch (e) {
       conv.messages.push({

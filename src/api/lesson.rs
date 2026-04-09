@@ -55,7 +55,19 @@ pub async fn chat(
         .await
         .map_err(|e: DbErr| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let system_prompt = build_system_prompt(&profile, &weak_points, &lru_vocab);
+    // Load all vocabulary linked to the current lesson (no limit)
+    let lesson_vocab = if let Some(lid) = input.lesson_id {
+        vocabulary::Entity::find()
+            .filter(vocabulary::Column::LessonId.eq(lid))
+            .order_by_asc(vocabulary::Column::LastPracticed)
+            .all(&state.db)
+            .await
+            .map_err(|e: DbErr| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        vec![]
+    };
+
+    let system_prompt = build_system_prompt(&profile, &weak_points, &lru_vocab, &lesson_vocab);
 
     let mcp_base_url = format!("{}/mcp", state.self_url);
 
@@ -219,6 +231,7 @@ fn build_system_prompt(
     profile: &user_language_profile::Model,
     weak_points: &[weak_point::Model],
     lru_vocab: &[vocabulary::Model],
+    lesson_vocab: &[vocabulary::Model],
 ) -> String {
     let wp_list = if weak_points.is_empty() {
         "None identified yet.".to_string()
@@ -254,6 +267,24 @@ fn build_system_prompt(
         )
     };
 
+    let lesson_vocab_list = if lesson_vocab.is_empty() {
+        String::new()
+    } else {
+        let items = lesson_vocab
+            .iter()
+            .map(|v| {
+                format!(
+                    "- {} → {} (errors: {})",
+                    v.word, v.translation, v.error_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n## Vocabulary Added This Lesson\n{items}\n"
+        )
+    };
+
     format!(
         r#"You are a language tutor for {target_language}.
 
@@ -266,7 +297,7 @@ Tutor style: {style}
 
 ## Vocabulary Needing Practice (LRU order — least recently practiced first)
 {vocab_list}
-
+{lesson_vocab_list}
 ## Instructions
 - NEVER reply with an empty message. Always provide meaningful content in every response.
 - Conduct the lesson naturally in {target_language}, adjusting complexity to {level} level.
@@ -281,7 +312,23 @@ Tutor style: {style}
 - You MUST always include a text response to the student. Never respond with only tool calls and no text.
 - When explaining grammar or vocabulary, use {explanation_language}.
 - Match the {style} tutor personality throughout.
-- IMPORTANT: You MUST use the provided tools (add_vocabulary, bump_vocabulary, add_weak_point, resolve_weak_point) via function calls. Do NOT just list words in text — call add_vocabulary for each new word. Do NOT describe actions — execute them with the tools."#,
+- IMPORTANT: You MUST use the provided tools (add_vocabulary, bump_vocabulary, add_weak_point, resolve_weak_point) via function calls. Do NOT just list words in text — call add_vocabulary for each new word. Do NOT describe actions — execute them with the tools.
+
+## Teaching Guidelines
+- When the student uses or asks about a verb, teach related forms and call add_vocabulary for each:
+  - The infinitive form (e.g. "hablar")
+  - Key conjugations the student needs at their level (present, past, etc.)
+  - Common irregular forms if applicable
+  - Related verbs or synonyms (e.g. "decir" → also teach "contar", "hablar")
+- When the student uses a noun, consider adding related words:
+  - The opposite or antonym if useful
+  - Common collocations (e.g. "trabajo" → "trabajar", "trabajador")
+  - Words from the same family (verb/noun/adjective forms)
+- When the student makes a mistake in a word (spelling, conjugation, gender, etc.):
+  - Call add_vocabulary with the correct form and its translation so the student can review it later
+  - If the mistake involves a verb conjugation, also add the infinitive form
+  - If the word is already in vocabulary, call bump_vocabulary instead to mark it for more practice
+- Always call add_vocabulary for each related word you teach — do not just mention them in text."#,
         target_language = profile.language,
         level = profile.level,
         explanation_language = profile.explanation_language,
@@ -289,6 +336,7 @@ Tutor style: {style}
         personal_note_section = personal_note_section,
         wp_list = wp_list,
         vocab_list = vocab_list,
+        lesson_vocab_list = lesson_vocab_list,
     )
 }
 
@@ -428,135 +476,8 @@ async fn call_llm_with_tools(
             continue;
         }
 
-        // Fallback for Ollama models that describe tool actions in text
-        // instead of making actual tool calls: ask the LLM to extract
-        // vocabulary and weak points from its own response.
-        if matches!(state.llm, LlmProvider::Ollama { .. }) {
-            let fallback_tools = extract_tools_from_text(state, &text, profile_id, lesson_id).await;
-            if !fallback_tools.is_empty() {
-                tracing::info!("Fallback tool extraction found {} tool call(s)", fallback_tools.len());
-                for (tool_name, input) in &fallback_tools {
-                    match execute_tool(state, tool_name, input, profile_id, lesson_id, mcp_base_url).await {
-                        Ok(v) => tracing::info!("Fallback tool '{tool_name}' succeeded: {v}"),
-                        Err(e) => tracing::error!("Fallback tool '{tool_name}' failed: {e}"),
-                    }
-                }
-            }
-        }
-
         return Ok(text);
     }
-}
-
-/// Fallback: parse the LLM's text response to extract vocabulary words it
-/// mentioned but didn't call tools for.  Uses a second, focused LLM request
-/// that asks *only* for tool calls.
-async fn extract_tools_from_text(
-    state: &AppState,
-    assistant_text: &str,
-    _profile_id: Uuid,
-    _lesson_id: Option<Uuid>,
-) -> Vec<(String, serde_json::Value)> {
-    let LlmProvider::Ollama { base_url, model } = &state.llm else {
-        return vec![];
-    };
-
-    let extraction_prompt = format!(
-        r#"You are a tool-calling assistant. The following is a language tutor's response to a student.
-Extract ALL vocabulary words that the tutor mentioned, taught, or added in this response.
-For each word, call add_vocabulary with the word and its translation.
-Also call add_weak_point for any grammar issues identified.
-
-IMPORTANT: You MUST respond ONLY with tool calls. Do NOT output any text.
-
-Tutor's response:
-{assistant_text}"#
-    );
-
-    let tools = serde_json::json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "add_vocabulary",
-                "description": "Add a word to vocabulary",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "word": {"type": "string"},
-                        "translation": {"type": "string"},
-                        "context": {"type": "string"}
-                    },
-                    "required": ["word", "translation"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "add_weak_point",
-                "description": "Record a grammar weak point",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "type": {"type": "string", "enum": ["grammar", "vocabulary", "phrase"]},
-                        "detail": {"type": "string"}
-                    },
-                    "required": ["type", "detail"]
-                }
-            }
-        }
-    ]);
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "You are a tool-calling assistant. Respond ONLY with tool calls, never with text."},
-            {"role": "user", "content": extraction_prompt}
-        ],
-        "tools": tools,
-        "stream": false,
-    });
-
-    let resp = match state.http_client
-        .post(format!("{base_url}/api/chat"))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("Fallback extraction request failed: {e}");
-            return vec![];
-        }
-    };
-
-    let resp_body: serde_json::Value = match resp.json().await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("Fallback extraction response parse failed: {e}");
-            return vec![];
-        }
-    };
-
-    tracing::debug!("Fallback extraction response: {resp_body}");
-
-    let mut results = vec![];
-    if let Some(tcs) = resp_body["message"]["tool_calls"].as_array() {
-        for tc in tcs {
-            let name = tc["function"]["name"].as_str().unwrap_or("");
-            if name.is_empty() { continue; }
-            let args = if tc["function"]["arguments"].is_object() {
-                tc["function"]["arguments"].clone()
-            } else if let Some(s) = tc["function"]["arguments"].as_str() {
-                serde_json::from_str(s).unwrap_or_default()
-            } else {
-                continue;
-            };
-            results.push((name.to_string(), args));
-        }
-    }
-
-    results
 }
 
 async fn send_claude_request(
