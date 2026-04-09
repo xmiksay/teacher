@@ -17,6 +17,7 @@ pub struct CreateVocab {
     pub translation: String,
     pub added_by: Option<String>,
     pub context: Option<String>,
+    pub lesson_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +40,7 @@ pub async fn create_vocab(
         context: Set(input.context),
         last_practiced: Set(chrono::Utc::now().into()),
         error_count: Set(0),
+        lesson_id: Set(input.lesson_id),
     };
 
     let result = model
@@ -99,4 +101,19 @@ pub async fn delete_all_vocab(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(())
+}
+
+pub async fn list_lesson_vocab(
+    _auth: AuthUser,
+    State(state): State<AppState>,
+    Path(lesson_id): Path<Uuid>,
+) -> Result<Json<Vec<vocabulary::Model>>, (axum::http::StatusCode, String)> {
+    let vocab = vocabulary::Entity::find()
+        .filter(vocabulary::Column::LessonId.eq(lesson_id))
+        .order_by_asc(vocabulary::Column::Word)
+        .all(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(vocab))
 }

@@ -13,6 +13,7 @@ pub struct Model {
     pub context: Option<String>,
     pub last_practiced: DateTimeWithTimeZone,
     pub error_count: i32,
+    pub lesson_id: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -23,11 +24,23 @@ pub enum Relation {
         to = "super::user_language_profile::Column::Id"
     )]
     Profile,
+    #[sea_orm(
+        belongs_to = "super::lesson::Entity",
+        from = "Column::LessonId",
+        to = "super::lesson::Column::Id"
+    )]
+    Lesson,
 }
 
 impl Related<super::user_language_profile::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Profile.def()
+    }
+}
+
+impl Related<super::lesson::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Lesson.def()
     }
 }
 

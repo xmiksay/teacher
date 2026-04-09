@@ -6,7 +6,7 @@ use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect, ColumnTrait, Db
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::AppState;
+use crate::{AppState, LlmProvider};
 use crate::auth::AuthUser;
 use crate::entities::{lesson, lesson_message, user_language_profile, vocabulary, weak_point};
 
@@ -123,6 +123,8 @@ pub async fn chat(
     let all_api_messages: Vec<serde_json::Value> = input
         .messages
         .iter()
+        // Filter out empty assistant messages that confuse smaller models
+        .filter(|m| !(m.role == "assistant" && m.content.trim().is_empty()))
         .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
         .collect();
 
@@ -135,12 +137,13 @@ pub async fn chat(
         all_api_messages
     };
 
-    let reply = call_claude_with_tools(
+    let reply = call_llm_with_tools(
         &state,
         &system_prompt,
         api_messages,
         tools,
         input.profile_id,
+        input.lesson_id,
         &mcp_base_url,
     )
     .await
@@ -149,19 +152,25 @@ pub async fn chat(
     // Persist conversation to lesson (skip empty replies)
     if let Some(lesson_id) = input.lesson_id && !reply.trim().is_empty() {
         let now = chrono::Utc::now().fixed_offset();
+        let is_greeting = input.messages.last()
+            .map(|m| m.content.starts_with("[lesson:greeting]"))
+            .unwrap_or(false);
 
         // Insert the user's last message and the assistant reply as lesson_message rows
         if let Some(user_msg) = input.messages.last() {
             use sea_orm::ActiveModelTrait;
 
-            let user_row = lesson_message::ActiveModel {
-                id: sea_orm::Set(Uuid::new_v4()),
-                lesson_id: sea_orm::Set(lesson_id),
-                role: sea_orm::Set(user_msg.role.clone()),
-                content: sea_orm::Set(user_msg.content.clone()),
-                created_at: sea_orm::Set(now),
-            };
-            let _ = user_row.insert(&state.db).await;
+            // Skip persisting the hidden greeting prompt
+            if !is_greeting {
+                let user_row = lesson_message::ActiveModel {
+                    id: sea_orm::Set(Uuid::new_v4()),
+                    lesson_id: sea_orm::Set(lesson_id),
+                    role: sea_orm::Set(user_msg.role.clone()),
+                    content: sea_orm::Set(user_msg.content.clone()),
+                    created_at: sea_orm::Set(now),
+                };
+                let _ = user_row.insert(&state.db).await;
+            }
 
             let assistant_row = lesson_message::ActiveModel {
                 id: sea_orm::Set(Uuid::new_v4()),
@@ -175,14 +184,18 @@ pub async fn chat(
 
         // Generate title from first user message if this is the first exchange
         if input.messages.len() <= 1 {
-            let title = input
-                .messages
-                .first()
-                .map(|m| {
-                    let t = m.content.chars().take(60).collect::<String>();
-                    if m.content.len() > 60 { format!("{t}...") } else { t }
-                })
-                .unwrap_or_else(|| "New lesson".to_string());
+            let title = if is_greeting {
+                "New lesson".to_string()
+            } else {
+                input
+                    .messages
+                    .first()
+                    .map(|m| {
+                        let t = m.content.chars().take(60).collect::<String>();
+                        if m.content.len() > 60 { format!("{t}...") } else { t }
+                    })
+                    .unwrap_or_else(|| "New lesson".to_string())
+            };
 
             if let Ok(Some(existing)) = lesson::Entity::find_by_id(lesson_id).one(&state.db).await {
                 let mut active: lesson::ActiveModel = existing.into();
@@ -267,7 +280,8 @@ Tutor style: {style}
 - Use the other tools (bump_vocabulary, add_weak_point, resolve_weak_point, set_topic_preference) silently — do not mention them to the student.
 - You MUST always include a text response to the student. Never respond with only tool calls and no text.
 - When explaining grammar or vocabulary, use {explanation_language}.
-- Match the {style} tutor personality throughout."#,
+- Match the {style} tutor personality throughout.
+- IMPORTANT: You MUST use the provided tools (add_vocabulary, bump_vocabulary, add_weak_point, resolve_weak_point) via function calls. Do NOT just list words in text — call add_vocabulary for each new word. Do NOT describe actions — execute them with the tools."#,
         target_language = profile.language,
         level = profile.level,
         explanation_language = profile.explanation_language,
@@ -278,106 +292,114 @@ Tutor style: {style}
     )
 }
 
-/// Calls the Claude API with tools, handles tool_use responses by executing them locally,
+struct ToolCall {
+    id: String,
+    name: String,
+    input: serde_json::Value,
+}
+
+struct LlmResponse {
+    text_parts: Vec<String>,
+    tool_calls: Vec<ToolCall>,
+    /// Raw assistant content to echo back into the conversation for tool round-trips.
+    raw_assistant: serde_json::Value,
+}
+
+/// Calls the configured LLM with tools, handles tool_use responses by executing them locally,
 /// and returns the final text response.
-async fn call_claude_with_tools(
+async fn call_llm_with_tools(
     state: &AppState,
     system_prompt: &str,
     messages: Vec<serde_json::Value>,
     tools: serde_json::Value,
     profile_id: Uuid,
+    lesson_id: Option<Uuid>,
     mcp_base_url: &str,
 ) -> anyhow::Result<String> {
     let client = &state.http_client;
     let mut conversation = messages;
 
     loop {
-        let body = serde_json::json!({
-            "model": &state.claude_model,
-            "max_tokens": 4096,
-            "system": system_prompt,
-            "messages": conversation,
-            "tools": tools,
-        });
+        let resp = match &state.llm {
+            LlmProvider::Claude { .. } => {
+                send_claude_request(client, &state.llm, system_prompt, &conversation, &tools).await?
+            }
+            LlmProvider::Ollama { .. } => {
+                send_ollama_request(client, &state.llm, system_prompt, &conversation, &tools).await?
+            }
+        };
 
-        let resp = client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &state.anthropic_api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        if !resp.tool_calls.is_empty() {
+            // Execute each tool and collect results
+            let mut results = Vec::new();
+            for tc in &resp.tool_calls {
+                let result = execute_tool(state, &tc.name, &tc.input, profile_id, lesson_id, mcp_base_url).await;
+                let content = match &result {
+                    Ok(v) => {
+                        if matches!(state.llm, LlmProvider::Ollama { .. }) {
+                            tracing::info!("Tool '{}' result: {v}", tc.name);
+                        }
+                        v.to_string()
+                    }
+                    Err(e) => {
+                        tracing::error!("Tool '{}' failed: {e}", tc.name);
+                        format!("Error: {e}")
+                    }
+                };
+                results.push((tc.id.clone(), content));
+            }
 
-        let status = resp.status();
-        let resp_body: serde_json::Value = resp.json().await?;
-
-        if !status.is_success() {
-            anyhow::bail!("Claude API error {}: {}", status, resp_body);
-        }
-
-        let _stop_reason = resp_body["stop_reason"].as_str().unwrap_or("");
-        let content = resp_body["content"].as_array().ok_or_else(|| anyhow::anyhow!("No content in response"))?;
-
-        // Collect text parts and tool_use parts
-        let mut text_parts = Vec::new();
-        let mut tool_uses = Vec::new();
-
-        for block in content {
-            match block["type"].as_str() {
-                Some("text") => {
-                    if let Some(text) = block["text"].as_str() {
-                        text_parts.push(text.to_string());
+            // Append assistant + tool results in provider-specific format
+            match &state.llm {
+                LlmProvider::Claude { .. } => {
+                    conversation.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": resp.raw_assistant,
+                    }));
+                    let tool_results: Vec<serde_json::Value> = results.iter().map(|(id, content)| {
+                        serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": id,
+                            "content": content,
+                        })
+                    }).collect();
+                    conversation.push(serde_json::json!({
+                        "role": "user",
+                        "content": tool_results,
+                    }));
+                }
+                LlmProvider::Ollama { .. } => {
+                    conversation.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": resp.raw_assistant,
+                        "tool_calls": resp.tool_calls.iter().map(|tc| serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.input,
+                            }
+                        })).collect::<Vec<_>>(),
+                    }));
+                    for (id, content) in &results {
+                        conversation.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": id,
+                            "content": content,
+                        }));
                     }
                 }
-                Some("tool_use") => {
-                    tool_uses.push(block.clone());
-                }
-                _ => {}
             }
-        }
-
-        if !tool_uses.is_empty() {
-            // Add assistant message with the full content
-            conversation.push(serde_json::json!({
-                "role": "assistant",
-                "content": content,
-            }));
-
-            // Execute each tool and collect results
-            let mut tool_results = Vec::new();
-            for tool_use in &tool_uses {
-                let tool_name = tool_use["name"].as_str().unwrap_or("");
-                let tool_id = tool_use["id"].as_str().unwrap_or("");
-                let tool_input = &tool_use["input"];
-
-                let result = execute_tool(state, tool_name, tool_input, profile_id, mcp_base_url).await;
-
-                tool_results.push(serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": tool_id,
-                    "content": match &result {
-                        Ok(v) => v.to_string(),
-                        Err(e) => format!("Error: {e}"),
-                    },
-                }));
-            }
-
-            conversation.push(serde_json::json!({
-                "role": "user",
-                "content": tool_results,
-            }));
-
             continue;
         }
 
-        // No more tool calls — return the text if we have any
-        let text = text_parts.join("\n");
+        // No tool calls — return text if we have any
+        let text = resp.text_parts.join("\n");
         if text.is_empty() {
-            // Claude ended without producing text — nudge it to respond
+            // LLM ended without producing text — nudge it to respond
             conversation.push(serde_json::json!({
                 "role": "assistant",
-                "content": content,
+                "content": resp.raw_assistant,
             }));
             conversation.push(serde_json::json!({
                 "role": "user",
@@ -389,11 +411,198 @@ async fn call_claude_with_tools(
     }
 }
 
+async fn send_claude_request(
+    client: &reqwest::Client,
+    provider: &LlmProvider,
+    system_prompt: &str,
+    conversation: &[serde_json::Value],
+    tools: &serde_json::Value,
+) -> anyhow::Result<LlmResponse> {
+    let LlmProvider::Claude { api_key, model } = provider else {
+        unreachable!()
+    };
+
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 4096,
+        "system": system_prompt,
+        "messages": conversation,
+        "tools": tools,
+    });
+
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let resp_body: serde_json::Value = resp.json().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("Claude API error {}: {}", status, resp_body);
+    }
+
+    let content = resp_body["content"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("No content in response"))?;
+
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    for block in content {
+        match block["type"].as_str() {
+            Some("text") => {
+                if let Some(text) = block["text"].as_str() {
+                    text_parts.push(text.to_string());
+                }
+            }
+            Some("tool_use") => {
+                tool_calls.push(ToolCall {
+                    id: block["id"].as_str().unwrap_or("").to_string(),
+                    name: block["name"].as_str().unwrap_or("").to_string(),
+                    input: block["input"].clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(LlmResponse {
+        text_parts,
+        tool_calls,
+        raw_assistant: serde_json::json!(content),
+    })
+}
+
+fn to_openai_tools(anthropic_tools: &serde_json::Value) -> serde_json::Value {
+    let tools = anthropic_tools.as_array().unwrap();
+    serde_json::json!(tools.iter().map(|t| {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            }
+        })
+    }).collect::<Vec<_>>())
+}
+
+async fn send_ollama_request(
+    client: &reqwest::Client,
+    provider: &LlmProvider,
+    system_prompt: &str,
+    conversation: &[serde_json::Value],
+    tools: &serde_json::Value,
+) -> anyhow::Result<LlmResponse> {
+    let LlmProvider::Ollama { base_url, model } = provider else {
+        unreachable!()
+    };
+
+    let mut messages = vec![serde_json::json!({"role": "system", "content": system_prompt})];
+    messages.extend_from_slice(conversation);
+
+    // Inject a reminder as the last system message so the model doesn't forget tools
+    messages.push(serde_json::json!({
+        "role": "system",
+        "content": "REMINDER: You have tools available. When adding vocabulary, you MUST call add_vocabulary for EACH word. Do NOT list words in text without calling the tool. When the student makes a grammar mistake, call add_weak_point. Execute actions with tools, do not just describe them."
+    }));
+
+    let openai_tools = to_openai_tools(tools);
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "tools": openai_tools,
+        "stream": false,
+        "think": false,
+    });
+
+    tracing::debug!("Ollama request to {base_url}/api/chat model={model} body={body}");
+
+    let resp = client
+        .post(format!("{base_url}/api/chat"))
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let resp_body: serde_json::Value = resp.json().await?;
+
+    if !status.is_success() {
+        tracing::error!("Ollama API error {status}: {resp_body}");
+        anyhow::bail!("Ollama API error {}: {}", status, resp_body);
+    }
+
+    tracing::debug!("Ollama raw response: {resp_body}");
+
+    // Native Ollama API: response is { "message": { "role", "content", "tool_calls" }, ... }
+    let message = &resp_body["message"];
+    if message.is_null() {
+        tracing::error!("Ollama response missing message field: {resp_body}");
+        anyhow::bail!("Ollama response missing message field");
+    }
+
+    let text_content = message["content"].as_str().unwrap_or("").to_string();
+
+    let mut text_parts = Vec::new();
+    if !text_content.is_empty() {
+        text_parts.push(text_content.clone());
+    }
+
+    let mut tool_calls = Vec::new();
+    if let Some(tcs) = message["tool_calls"].as_array() {
+        for tc in tcs {
+            let func = &tc["function"];
+            let name = func["name"].as_str().unwrap_or("");
+
+            if name.is_empty() {
+                tracing::warn!("Ollama returned tool_call with empty name: {tc}");
+                continue;
+            }
+
+            // Native Ollama API returns arguments as a JSON object, not a string
+            let input = if func["arguments"].is_object() {
+                func["arguments"].clone()
+            } else if let Some(s) = func["arguments"].as_str() {
+                serde_json::from_str(s).unwrap_or_else(|e| {
+                    tracing::warn!("Ollama tool '{name}' invalid JSON arguments: {e}, raw: {s}");
+                    func["arguments"].clone()
+                })
+            } else {
+                tracing::warn!("Ollama tool '{name}' unexpected arguments type: {}", func["arguments"]);
+                serde_json::json!({})
+            };
+
+            let id = format!("call_{}", Uuid::new_v4());
+
+            tracing::info!("Ollama tool call: {name}({input})");
+            tool_calls.push(ToolCall { id, name: name.to_string(), input });
+        }
+    }
+
+    if tool_calls.is_empty() && text_content.is_empty() {
+        tracing::warn!("Ollama returned neither text nor tool calls: {resp_body}");
+    }
+
+    Ok(LlmResponse {
+        text_parts,
+        tool_calls,
+        raw_assistant: serde_json::json!(text_content),
+    })
+}
+
 async fn execute_tool(
     state: &AppState,
     tool_name: &str,
     input: &serde_json::Value,
     profile_id: Uuid,
+    lesson_id: Option<Uuid>,
     _mcp_base_url: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let db = &state.db;
@@ -413,6 +622,7 @@ async fn execute_tool(
                 context: sea_orm::Set(context),
                 last_practiced: sea_orm::Set(chrono::Utc::now().into()),
                 error_count: sea_orm::Set(0),
+                lesson_id: sea_orm::Set(lesson_id),
             };
 
             use sea_orm::ActiveModelTrait;

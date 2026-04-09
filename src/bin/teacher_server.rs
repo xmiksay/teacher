@@ -5,7 +5,7 @@ use sea_orm_migration::MigratorTrait;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
-use teacher_server::{AppState, api, mcp, migration};
+use teacher_server::{AppState, LlmProvider, api, mcp, migration};
 
 #[derive(Embed)]
 #[folder = "client/dist"]
@@ -15,16 +15,33 @@ struct Assets;
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
+    let log_filter = std::env::var("RUST_LOG")
+        .unwrap_or_else(|_| "teacher_server=debug,info,sea_orm=warn,sqlx=warn".into());
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(EnvFilter::new(&log_filter))
         .init();
+    tracing::info!("Log filter: {log_filter}");
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://teacher:teacher@localhost:5432/teacher".to_string());
-    let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY")
-        .expect("ANTHROPIC_API_KEY must be set");
-    let claude_model = std::env::var("CLAUDE_MODEL")
-        .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+    let llm = match std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "claude".into()).as_str() {
+        "ollama" => {
+            let base_url = std::env::var("OLLAMA_URL")
+                .unwrap_or_else(|_| "http://localhost:11434".into());
+            let model = std::env::var("OLLAMA_MODEL")
+                .unwrap_or_else(|_| "llama3.1".into());
+            tracing::info!("Using Ollama provider: {base_url} model={model}");
+            LlmProvider::Ollama { base_url, model }
+        }
+        _ => {
+            let api_key = std::env::var("ANTHROPIC_API_KEY")
+                .expect("ANTHROPIC_API_KEY must be set when LLM_PROVIDER=claude");
+            let model = std::env::var("CLAUDE_MODEL")
+                .unwrap_or_else(|_| "claude-sonnet-4-20250514".into());
+            tracing::info!("Using Claude provider: model={model}");
+            LlmProvider::Claude { api_key, model }
+        }
+    };
     let self_url = std::env::var("SELF_URL")
         .unwrap_or_else(|_| "http://localhost:3000".to_string());
     let listen_addr = std::env::var("LISTEN_ADDR")
@@ -39,8 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db,
         http_client: reqwest::Client::new(),
-        anthropic_api_key,
-        claude_model,
+        llm,
         self_url,
     };
 
@@ -63,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/weak-points/{profile_id}", get(api::weak_points::list_weak_points))
         // Vocabulary
         .route("/api/vocab", post(api::vocab::create_vocab))
+        .route("/api/vocab/lesson/{lesson_id}", get(api::vocab::list_lesson_vocab))
         .route("/api/vocab/{profile_id}", get(api::vocab::list_vocab))
         .route("/api/vocab/{id}/delete", delete(api::vocab::delete_vocab))
         .route("/api/vocab/{profile_id}/delete-all", delete(api::vocab::delete_all_vocab))

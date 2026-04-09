@@ -15,6 +15,7 @@ export interface VocabWord {
 
 export const useVocabStore = defineStore('vocab', () => {
   const words = ref<VocabWord[]>([])
+  const lessonWords = ref<VocabWord[]>([])
   const flashcardIndex = ref(0)
 
   async function loadVocab(profileId: string) {
@@ -58,11 +59,25 @@ export const useVocabStore = defineStore('vocab', () => {
     flashcardIndex.value = 0
   }
 
+  async function loadLessonVocab(lessonId: string) {
+    const auth = useAuthStore()
+    const resp = await fetch(`/api/vocab/lesson/${lessonId}`, {
+      headers: { ...auth.authHeaders() },
+    })
+    if (resp.ok) {
+      lessonWords.value = await resp.json()
+    }
+  }
+
+  function clearLessonVocab() {
+    lessonWords.value = []
+  }
+
   function nextFlashcard() {
     if (words.value.length > 0) {
       flashcardIndex.value = (flashcardIndex.value + 1) % words.value.length
     }
   }
 
-  return { words, flashcardIndex, loadVocab, addWord, deleteWord, deleteAll, nextFlashcard }
+  return { words, lessonWords, flashcardIndex, loadVocab, loadLessonVocab, clearLessonVocab, addWord, deleteWord, deleteAll, nextFlashcard }
 })

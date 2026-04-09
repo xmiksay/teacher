@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { useAuthStore } from './auth'
 import { useProfileStore } from './profile'
+import { useVocabStore } from './vocab'
 
 const LAST_LESSON_KEY = 'teacher_last_lesson_id'
 
@@ -88,6 +89,7 @@ export const useLessonStore = defineStore('lesson', () => {
     if (!profileId) return
 
     const auth = useAuthStore()
+    const vocabStore = useVocabStore()
     const resp = await fetch('/api/lessons', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...auth.authHeaders() },
@@ -102,6 +104,51 @@ export const useLessonStore = defineStore('lesson', () => {
       lessonId: lesson.id,
       messages: [],
     })
+
+    vocabStore.clearLessonVocab()
+
+    // Auto-send greeting to start the lesson
+    loading.value = true
+    try {
+      const chatResp = await fetch('/api/lesson/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth.authHeaders() },
+        body: JSON.stringify({
+          profile_id: profileId,
+          lesson_id: lesson.id,
+          messages: [{ role: 'user', content: '[lesson:greeting] New lesson started. Greet the student and ask what they want to work on today. Suggest a few options based on their weak points and vocabulary.' }],
+          loop_mode: false,
+        }),
+      })
+
+      if (chatResp.ok) {
+        const data = await chatResp.json()
+        const conv = conversations.value.get(profileId)
+        if (conv) {
+          // Reload lesson detail to get persisted messages (only assistant reply is persisted)
+          const detailResp = await fetch(`/api/lessons/${lesson.id}/detail`, {
+            headers: auth.authHeaders(),
+          })
+          if (detailResp.ok) {
+            const detail = await detailResp.json()
+            conv.messages = (detail.messages ?? []).map((m: any) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+            }))
+          } else {
+            conv.messages = [{ role: 'assistant', content: data.reply }]
+          }
+        }
+      }
+    } catch (e) {
+      const conv = conversations.value.get(profileId)
+      if (conv) {
+        conv.messages.push({ role: 'assistant', content: 'Error starting lesson.' })
+      }
+    } finally {
+      loading.value = false
+    }
   }
 
   async function loadLesson(lessonId: string) {
@@ -133,6 +180,10 @@ export const useLessonStore = defineStore('lesson', () => {
       lessonId: lesson.id,
       messages,
     })
+
+    // Load vocabulary associated with this lesson
+    const vocabStore = useVocabStore()
+    await vocabStore.loadLessonVocab(lessonId)
   }
 
   async function loadLessonHistory(profileId: string) {
@@ -233,6 +284,10 @@ export const useLessonStore = defineStore('lesson', () => {
             content: m.content,
           }))
         }
+
+        // Reload lesson vocabulary (may have been added by Claude tools)
+        const vocabStore = useVocabStore()
+        await vocabStore.loadLessonVocab(conv.lessonId)
       }
     } catch (e) {
       conv.messages.push({

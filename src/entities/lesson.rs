@@ -22,6 +22,8 @@ pub enum Relation {
     Profile,
     #[sea_orm(has_many = "super::lesson_message::Entity")]
     Messages,
+    #[sea_orm(has_many = "super::vocabulary::Entity")]
+    Vocabulary,
 }
 
 impl Related<super::user_language_profile::Entity> for Entity {
@@ -33,6 +35,12 @@ impl Related<super::user_language_profile::Entity> for Entity {
 impl Related<super::lesson_message::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Messages.def()
+    }
+}
+
+impl Related<super::vocabulary::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Vocabulary.def()
     }
 }
 

@@ -68,7 +68,7 @@ function logout() {
             v-if="profileStore.profiles.length > 0"
             :value="profileStore.current?.id ?? ''"
             @change="profileStore.current = profileStore.profiles.find((p) => p.id === ($event.target as HTMLSelectElement).value) ?? null"
-            class="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-2 py-1 text-sm"
+            class="rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-2 py-1 text-sm"
           >
             <option v-for="profile in profileStore.profiles" :key="profile.id" :value="profile.id">
               {{ profile.language }} ({{ profile.level }})

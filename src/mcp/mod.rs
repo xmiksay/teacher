@@ -104,6 +104,7 @@ pub async fn add_vocabulary(
         context: Set(input.context),
         last_practiced: Set(chrono::Utc::now().into()),
         error_count: Set(0),
+        lesson_id: Set(None),
     };
 
     model

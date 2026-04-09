@@ -76,7 +76,7 @@ async function deleteProfile() {
           placeholder="Language (e.g. Spanish)"
           class="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
         />
-        <select v-model="newLevel" class="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm">
+        <select v-model="newLevel" class="rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3 py-2 text-sm">
           <option v-for="l in ['A1','A2','B1','B2','C1','C2']" :key="l" :value="l">{{ l }}</option>
         </select>
         <button type="submit" class="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white">Create</button>
@@ -115,13 +115,13 @@ async function deleteProfile() {
       <form @submit.prevent="saveSettings" class="space-y-3">
         <div>
           <label class="block text-xs text-gray-500 mb-1">Level</label>
-          <select v-model="editLevel" class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm">
+          <select v-model="editLevel" class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3 py-2 text-sm">
             <option v-for="l in ['A1','A2','B1','B2','C1','C2']" :key="l" :value="l">{{ l }}</option>
           </select>
         </div>
         <div>
           <label class="block text-xs text-gray-500 mb-1">Tutor Style</label>
-          <select v-model="editStyle" class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm">
+          <select v-model="editStyle" class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3 py-2 text-sm">
             <option value="friendly">Friendly</option>
             <option value="strict">Strict</option>
             <option value="immersive">Immersive</option>

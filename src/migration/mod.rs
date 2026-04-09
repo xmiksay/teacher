@@ -5,6 +5,7 @@ mod m20260408_000002_auth;
 mod m20260408_000003_lessons;
 mod m20260408_000004_personal_note;
 mod m20260409_000005_lesson_messages;
+mod m20260409_000006_vocab_lesson_id;
 
 pub struct Migrator;
 
@@ -16,6 +17,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260408_000003_lessons::Migration),
             Box::new(m20260408_000004_personal_note::Migration),
             Box::new(m20260409_000005_lesson_messages::Migration),
+            Box::new(m20260409_000006_vocab_lesson_id::Migration),
         ]
     }
 }
