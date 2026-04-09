@@ -2,8 +2,10 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { useProfileStore } from '../stores/profile'
 
 const authStore = useAuthStore()
+const profileStore = useProfileStore()
 const router = useRouter()
 
 const isRegister = ref(false)
@@ -25,6 +27,7 @@ async function submit() {
     } else {
       await authStore.login(username.value.trim(), password.value)
     }
+    await profileStore.loadProfiles()
     router.push('/lesson')
   } catch (e: any) {
     error.value = e.message || 'Something went wrong'
