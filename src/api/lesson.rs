@@ -300,7 +300,6 @@ Tutor style: {style}
 {lesson_vocab_list}
 ## Instructions
 - NEVER reply only with tool, but add some text message too.
-
 - Conduct the lesson naturally in {target_language}, adjusting complexity to {level} level.
 - When the student makes a mistake, correct it inline using this format:
   **Original:** <what they said>
@@ -316,16 +315,22 @@ Tutor style: {style}
 - IMPORTANT: You MUST use the provided tools (add_vocabulary, bump_vocabulary, add_weak_point, resolve_weak_point) via function calls. Do NOT just list words in text — call add_vocabulary for each new word. Do NOT describe actions — execute them with the tools.
 
 ## Teaching Guidelines
-- If student doing some mistake, store this information to weak point with command.
-  - When you found user has fixed mistake, remove this information from weak point with command.
-  
-- When the student makes a mistake in a word (spelling, conjugation, gender, etc.):
-  - Call add_weak_point with the correct form and its translation so the student can review it later
-  - If the word is already in vocabulary, call bump_vocabulary instead to mark it for more practice
-  - Do not add a words to weak points
-  
+- When the student shows a recurring grammar or usage pattern mistake, call add_weak_point to track it.
+  - When the student demonstrates they have fixed a weak point, call resolve_weak_point.
+  - Use type "grammar" for grammar patterns, "phrase" for common expressions/idioms.
+
+- When the student makes a mistake in a specific word (spelling, conjugation, gender, etc.):
+  - If the word is already in vocabulary, call bump_vocabulary to mark it for more practice.
+  - Otherwise, call add_vocabulary with the correct form and its translation.
+  - Do NOT add individual words to weak points — use vocabulary tools for words, weak points for grammar/usage patterns.
+
+- When the student uses or asks about a verb, teach related forms and call add_vocabulary for each:
+  - The infinitive form (e.g. "hablar")
+  - Key conjugations the student needs at their level
+  - Common irregular forms if applicable
+
 - Always call add_vocabulary for each related word you teach — do not just mention them in text.
-- Use explanation_language for words translation and explanations.
+- Use {explanation_language} for word translations and explanations.
 "#,
         target_language = profile.language,
         level = profile.level,
@@ -489,9 +494,16 @@ async fn send_claude_request(
         unreachable!()
     };
 
+    // Claude API requires the first message to have role "user".
+    // When a conversation is restored from the DB the hidden greeting prompt
+    // is not persisted, so the first message can be "assistant".
+    let mut messages = conversation.to_vec();
+    if messages.first().map_or(false, |m| m["role"] != "user") {
+        messages.insert(0, serde_json::json!({"role": "user", "content": "Hello, let's continue our lesson."}));
+    }
+
     // Inject a tool-use reminder before the last user message so Claude doesn't
     // lose track of tools in long, text-only conversation histories.
-    let mut messages = conversation.to_vec();
     if messages.len() > 2 {
         // Insert a reminder as a "user" turn just before the final user message
         let reminder = serde_json::json!({
@@ -521,7 +533,6 @@ async fn send_claude_request(
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
         .json(&body)
         .send()
         .await?;
