@@ -299,7 +299,8 @@ Tutor style: {style}
 {vocab_list}
 {lesson_vocab_list}
 ## Instructions
-- NEVER reply with an empty message. Always provide meaningful content in every response.
+- NEVER reply only with tool, but add some text message too.
+
 - Conduct the lesson naturally in {target_language}, adjusting complexity to {level} level.
 - When the student makes a mistake, correct it inline using this format:
   **Original:** <what they said>
@@ -315,20 +316,17 @@ Tutor style: {style}
 - IMPORTANT: You MUST use the provided tools (add_vocabulary, bump_vocabulary, add_weak_point, resolve_weak_point) via function calls. Do NOT just list words in text — call add_vocabulary for each new word. Do NOT describe actions — execute them with the tools.
 
 ## Teaching Guidelines
-- When the student uses or asks about a verb, teach related forms and call add_vocabulary for each:
-  - The infinitive form (e.g. "hablar")
-  - Key conjugations the student needs at their level (present, past, etc.)
-  - Common irregular forms if applicable
-  - Related verbs or synonyms (e.g. "decir" → also teach "contar", "hablar")
-- When the student uses a noun, consider adding related words:
-  - The opposite or antonym if useful
-  - Common collocations (e.g. "trabajo" → "trabajar", "trabajador")
-  - Words from the same family (verb/noun/adjective forms)
+- If student doing some mistake, store this information to weak point with command.
+  - When you found user has fixed mistake, remove this information from weak point with command.
+  
 - When the student makes a mistake in a word (spelling, conjugation, gender, etc.):
-  - Call add_vocabulary with the correct form and its translation so the student can review it later
-  - If the mistake involves a verb conjugation, also add the infinitive form
+  - Call add_weak_point with the correct form and its translation so the student can review it later
   - If the word is already in vocabulary, call bump_vocabulary instead to mark it for more practice
-- Always call add_vocabulary for each related word you teach — do not just mention them in text."#,
+  - Do not add a words to weak points
+  
+- Always call add_vocabulary for each related word you teach — do not just mention them in text.
+- Use explanation_language for words translation and explanations.
+"#,
         target_language = profile.language,
         level = profile.level,
         explanation_language = profile.explanation_language,
