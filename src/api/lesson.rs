@@ -529,20 +529,31 @@ async fn send_claude_request(
         "tools": tools,
     });
 
+    let body_bytes = serde_json::to_vec(&body)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize Claude request body: {e}"))?;
+
+    tracing::debug!("Claude request: {} messages, body size: {} bytes", messages.len(), body_bytes.len());
+
     let resp = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
-        .json(&body)
+        .header("content-type", "application/json")
+        .body(body_bytes)
         .send()
-        .await?;
+        .await
+        .map_err(|e| anyhow::anyhow!("Claude HTTP request failed: {e:#}"))?;
 
     let status = resp.status();
-    let resp_body: serde_json::Value = resp.json().await?;
+    let resp_text = resp.text().await
+        .map_err(|e| anyhow::anyhow!("Failed to read Claude response body: {e}"))?;
 
     if !status.is_success() {
-        anyhow::bail!("Claude API error {}: {}", status, resp_body);
+        anyhow::bail!("Claude API error {}: {}", status, resp_text);
     }
+
+    let resp_body: serde_json::Value = serde_json::from_str(&resp_text)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Claude response: {e}"))?;
 
     let content = resp_body["content"]
         .as_array()
