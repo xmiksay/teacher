@@ -613,13 +613,26 @@ async fn send_ollama_request(
     };
 
     let mut messages = vec![serde_json::json!({"role": "system", "content": system_prompt})];
-    messages.extend_from_slice(conversation);
 
-    // Inject a reminder as the last system message so the model doesn't forget tools
-    messages.push(serde_json::json!({
-        "role": "system",
-        "content": "REMINDER: You have tools available. When adding vocabulary, you MUST call add_vocabulary for EACH word. Do NOT list words in text without calling the tool. When the student makes a grammar mistake, call add_weak_point. Execute actions with tools, do not just describe them."
-    }));
+    // Ensure conversation starts with a user message after system.
+    // When loaded from DB the hidden greeting prompt is not persisted,
+    // so the first message can be "assistant" which breaks OpenAI turn structure.
+    let conv_start = if conversation.first().map_or(false, |m| m["role"] != "user") {
+        messages.push(serde_json::json!({"role": "user", "content": "Hello, let's continue our lesson."}));
+        0
+    } else {
+        0
+    };
+    messages.extend_from_slice(&conversation[conv_start..]);
+
+    // Inject a tool-use reminder as a system message BEFORE the last user message
+    // so the model sees it in context but still responds to the user's actual message.
+    if let Some(pos) = messages.iter().rposition(|m| m["role"] == "user") {
+        messages.insert(pos, serde_json::json!({
+            "role": "system",
+            "content": "REMINDER: You MUST use the provided tools via function calls. Call add_vocabulary for each new word. Call add_weak_point for grammar mistakes. Do NOT write tool names in text — execute them as function calls."
+        }));
+    }
 
     let openai_tools = to_openai_tools(tools);
 
