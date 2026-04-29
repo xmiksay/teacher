@@ -297,7 +297,6 @@ Tutor style: {style}
 {vocab_list}
 {lesson_vocab_list}
 ## Instructions
-- NEVER reply only with tool, but add some text message too.
 - Conduct the lesson naturally in {target_language}, adjusting complexity to {level} level.
 - ONLY correct the student's actual messages. NEVER correct your own sentences or examples.
 - When the student makes a mistake, correct it inline using this format:
@@ -307,12 +306,8 @@ Tutor style: {style}
   1. `<wrong>` → `<right>` — <brief explanation>
 - Do NOT generate incorrect examples and then correct them. If you want to teach, show only the correct form.
 - Subtly incorporate weak points into the conversation to help the student practice them.
-- When you add a new word to the student's vocabulary, briefly mention the word and its translation to the student so they know it was saved.
-- Use the other tools (bump_vocabulary, add_weak_point, resolve_weak_point, set_topic_preference) silently — do not mention them to the student.
-- You MUST always include a text response to the student. Never respond with only tool calls and no text.
-- When explaining grammar or vocabulary, use {explanation_language}.
+- When explaining grammar or vocabulary, use {explanation_language} language.
 - Match the {style} tutor personality throughout.
-- IMPORTANT: You MUST use the provided tools (add_vocabulary, bump_vocabulary, add_weak_point, resolve_weak_point) via function calls. Do NOT just list words in text — call add_vocabulary for each new word. Do NOT describe actions — execute them with the tools.
 
 ## Teaching Guidelines
 - When the student shows a recurring grammar or usage pattern mistake, call add_weak_point to track it.
@@ -330,7 +325,7 @@ Tutor style: {style}
   - Common irregular forms if applicable
 
 - Always call add_vocabulary for each related word you teach — do not just mention them in text.
-- Use {explanation_language} for word translations and explanations.
+- Use {explanation_language} language for word translations and explanations.
 "#,
         target_language = profile.language,
         level = profile.level,

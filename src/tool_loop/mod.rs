@@ -170,22 +170,6 @@ async fn send_claude_request(
         messages.insert(0, serde_json::json!({"role": "user", "content": "Hello, let's continue our lesson."}));
     }
 
-    // Inject a tool-use reminder before the last user message so Claude doesn't
-    // lose track of tools in long, text-only conversation histories.
-    if messages.len() > 2 {
-        let reminder = serde_json::json!({
-            "role": "user",
-            "content": "REMINDER: You have tools available (add_vocabulary, bump_vocabulary, add_weak_point, resolve_weak_point, set_topic_preference). When teaching new words, you MUST call add_vocabulary for each word. When the student makes a grammar mistake, call add_weak_point. Do NOT just describe actions in text — execute them with the tools."
-        });
-        if let Some(pos) = messages.iter().rposition(|m| m["role"] == "user") {
-            messages.insert(pos, reminder);
-            messages.insert(pos + 1, serde_json::json!({
-                "role": "assistant",
-                "content": "Understood, I will use the tools."
-            }));
-        }
-    }
-
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 4096,
@@ -283,13 +267,6 @@ async fn send_ollama_request(
         messages.push(serde_json::json!({"role": "user", "content": "Hello, let's continue our lesson."}));
     }
     messages.extend_from_slice(conversation);
-
-    if let Some(pos) = messages.iter().rposition(|m| m["role"] == "user") {
-        messages.insert(pos, serde_json::json!({
-            "role": "system",
-            "content": "REMINDER: You MUST use the provided tools via function calls. Call add_vocabulary for each new word. Call add_weak_point for grammar mistakes. Do NOT write tool names in text — execute them as function calls."
-        }));
-    }
 
     let openai_tools = to_openai_tools(tools);
 
