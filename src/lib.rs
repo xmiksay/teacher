@@ -1,8 +1,8 @@
 pub mod api;
 pub mod auth;
 pub mod entities;
-pub mod mcp;
 pub mod migration;
+pub mod tool_loop;
 
 use sea_orm::DatabaseConnection;
 

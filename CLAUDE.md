@@ -55,12 +55,12 @@ The Dockerfile builds the Vue client first, copies `client/dist` into the Rust b
 2. `AuthUser` extractor validates Bearer token from `auth_tokens` table
 3. Backend loads profile, weak points, and LRU vocabulary from DB
 4. Builds system prompt with student context baked in
-5. Calls Claude API with tools defined inline (not MCP protocol — direct tool_use loop)
-6. Tool calls (`add_vocabulary`, `bump_vocabulary`, `add_weak_point`, `resolve_weak_point`, `set_topic_preference`) are executed locally against the DB in a loop until Claude returns text
+5. Hands off to `tool_loop::run`, which sends the conversation + inline tool schema to the configured LLM (Claude or Ollama)
+6. Tool calls (`add_vocabulary`, `bump_vocabulary`, `add_weak_point`, `resolve_weak_point`, `set_topic_preference`) are executed locally against the DB; results are appended to the conversation and the LLM is called again. The loop repeats until the LLM returns a text-only response
 7. Conversation is persisted to the `lessons` table if `lesson_id` is provided
 
 ### Key Design Decisions
-- **Tools are server-side, not MCP**: Despite `/mcp/*` routes existing for testing, the lesson chat handler executes tools directly via `execute_tool()` in `src/api/lesson.rs`, not via HTTP callbacks
+- **Server-side tool loop, not MCP**: `src/tool_loop/mod.rs` drives the request → execute → request cycle locally. The `tool_use` blocks are part of the LLM provider's native tool API (Anthropic Messages or Ollama OpenAI-compatible), not MCP.
 - **LRU vocabulary**: Ordered by `last_practiced ASC`, no spaced repetition — natural rotation at scale
 - **Static files embedded**: `client/dist` is compiled into the server binary via `rust-embed`, so a client build is needed before `cargo build` for production
 - **Auth**: Bearer token in `Authorization` header, extracted via Axum's `FromRequestParts` (`src/auth.rs`). Passwords hashed with argon2.
@@ -88,10 +88,10 @@ The Dockerfile builds the Vue client first, copies `client/dist` into the Rust b
 ### Module Layout
 
 **Backend (`src/`)**
-- `lib.rs` — `AppState` struct (db, http_client, anthropic_api_key, claude_model, self_url)
+- `lib.rs` — `AppState` struct (db, http_client, llm provider, self_url)
 - `auth.rs` — `AuthUser` extractor (FromRequestParts)
 - `api/` — REST handlers: auth, lesson, lesson_history, profile, vocab, weak_points
-- `mcp/` — MCP-style REST endpoints (separate from tool execution in lesson.rs, used for testing)
+- `tool_loop/` — LLM tool loop: sends requests to Claude/Ollama, executes tool calls locally against the DB, loops until a final text response is returned
 - `entities/` — SeaORM models: user, auth_token, user_language_profile, vocabulary, weak_point, lesson, lesson_message
 - `migration/` — SeaORM migrations (auto-applied on server start)
 - `bin/` — three binaries: teacher_server, teacher_migration, teacher_cli

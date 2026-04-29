@@ -7,6 +7,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::api::auth::hash_token;
 use crate::entities::auth_token;
 
 /// Extractor that validates a Bearer token from the Authorization header.
@@ -28,12 +29,14 @@ impl FromRequestParts<AppState> for AuthUser {
             .and_then(|v| v.to_str().ok())
             .ok_or((StatusCode::UNAUTHORIZED, "Missing authorization header".to_string()))?;
 
-        let token = header
+        let raw_token = header
             .strip_prefix("Bearer ")
             .ok_or((StatusCode::UNAUTHORIZED, "Invalid authorization format".to_string()))?;
 
+        let token_hash = hash_token(raw_token);
+
         let record = auth_token::Entity::find()
-            .filter(auth_token::Column::Token.eq(token))
+            .filter(auth_token::Column::Token.eq(token_hash))
             .one(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?

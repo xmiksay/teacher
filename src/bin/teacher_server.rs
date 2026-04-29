@@ -5,7 +5,7 @@ use sea_orm_migration::MigratorTrait;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
-use teacher_server::{AppState, LlmProvider, api, mcp, migration};
+use teacher_server::{AppState, LlmProvider, api, migration};
 
 #[derive(Embed)]
 #[folder = "client/dist"]
@@ -85,13 +85,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/vocab/{profile_id}", get(api::vocab::list_vocab))
         .route("/api/vocab/{id}/delete", delete(api::vocab::delete_vocab))
         .route("/api/vocab/{profile_id}/delete-all", delete(api::vocab::delete_all_vocab))
-        // MCP endpoints (for direct access / testing)
-        .route("/mcp/profile/{profile_id}", get(mcp::get_profile))
-        .route("/mcp/vocabulary/{profile_id}", post(mcp::add_vocabulary))
-        .route("/mcp/vocabulary/{profile_id}/bump/{word}", post(mcp::bump_vocabulary))
-        .route("/mcp/weak_point/{profile_id}", post(mcp::add_weak_point))
-        .route("/mcp/weak_point/{profile_id}/resolve/{detail}", post(mcp::resolve_weak_point))
-        .route("/mcp/preference/{profile_id}", post(mcp::set_topic_preference))
         .layer(CorsLayer::permissive())
         .with_state(state)
         .fallback(static_handler);
