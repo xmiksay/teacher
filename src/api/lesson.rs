@@ -73,7 +73,7 @@ pub async fn chat(
     let tools = serde_json::json!([
         {
             "name": "add_vocabulary",
-            "description": "Add a new word to the student's vocabulary list. Use when the student asks about a word or makes a lexical mistake.",
+            "description": "Save a new target-language word to the student's vocabulary so it can be revisited in future lessons. Invoke whenever the student encounters, asks about, or makes a lexical mistake on a word that is not already tracked. Also invoke for each related form you teach (infinitive, key conjugations, irregular forms). The persistence layer records the word, translation, and context — the student does not need to be told the word was saved.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -86,41 +86,41 @@ pub async fn chat(
         },
         {
             "name": "bump_vocabulary",
-            "description": "Mark a known vocabulary word as needing more practice. Use when the student repeats a mistake on a word already in their vocabulary.",
+            "description": "Mark a tracked vocabulary word as needing more practice. Invoke when the student repeats a mistake on a word that is already in their vocabulary list (spelling, gender, conjugation, etc.).",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "word": {"type": "string", "description": "The word to bump"}
+                    "word": {"type": "string", "description": "The exact word as stored in the vocabulary list"}
                 },
                 "required": ["word"]
             }
         },
         {
             "name": "add_weak_point",
-            "description": "Record a recurring grammar or usage pattern the student struggles with.",
+            "description": "Record a recurring grammar or usage pattern the student struggles with (e.g. 'subjuntivo', 'ser vs estar', 'past participle agreement'). Invoke for patterns, not for individual words — single words go through the vocabulary tools.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "type": {"type": "string", "enum": ["grammar", "vocabulary", "phrase"], "description": "Category of the weak point"},
-                    "detail": {"type": "string", "description": "Description of the weak point, e.g. 'subjuntivo', 'ser vs estar'"}
+                    "type": {"type": "string", "enum": ["grammar", "vocabulary", "phrase"], "description": "grammar for grammar patterns, phrase for common expressions/idioms, vocabulary only for word-class mistakes"},
+                    "detail": {"type": "string", "description": "Concise description of the pattern, e.g. 'subjuntivo', 'ser vs estar'"}
                 },
                 "required": ["type", "detail"]
             }
         },
         {
             "name": "resolve_weak_point",
-            "description": "Mark a weak point as resolved when the student consistently uses the form correctly.",
+            "description": "Mark a weak point as resolved when the student has consistently produced the correct form across several turns.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "detail": {"type": "string", "description": "The weak point detail to resolve"}
+                    "detail": {"type": "string", "description": "The exact weak point detail as previously recorded"}
                 },
                 "required": ["detail"]
             }
         },
         {
             "name": "set_topic_preference",
-            "description": "Update the student's tutor style or explanation language preference.",
+            "description": "Update the student's tutor style or explanation language preference when they explicitly ask for a change.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -308,24 +308,7 @@ Tutor style: {style}
 - Subtly incorporate weak points into the conversation to help the student practice them.
 - When explaining grammar or vocabulary, use {explanation_language} language.
 - Match the {style} tutor personality throughout.
-
-## Teaching Guidelines
-- When the student shows a recurring grammar or usage pattern mistake, call add_weak_point to track it.
-  - When the student demonstrates they have fixed a weak point, call resolve_weak_point.
-  - Use type "grammar" for grammar patterns, "phrase" for common expressions/idioms.
-
-- When the student makes a mistake in a specific word (spelling, conjugation, gender, etc.):
-  - If the word is already in vocabulary, call bump_vocabulary to mark it for more practice.
-  - Otherwise, call add_vocabulary with the correct form and its translation.
-  - Do NOT add individual words to weak points — use vocabulary tools for words, weak points for grammar/usage patterns.
-
-- When the student uses or asks about a verb, teach related forms and call add_vocabulary for each:
-  - The infinitive form (e.g. "hablar")
-  - Key conjugations the student needs at their level
-  - Common irregular forms if applicable
-
-- Always call add_vocabulary for each related word you teach — do not just mention them in text.
-- Use {explanation_language} language for word translations and explanations.
+- When teaching a verb, also cover its key related forms (infinitive, common conjugations at this level, important irregular forms) so the student builds a complete picture.
 "#,
         target_language = profile.language,
         level = profile.level,
