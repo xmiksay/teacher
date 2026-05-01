@@ -73,7 +73,7 @@ pub async fn chat(
     let tools = serde_json::json!([
         {
             "name": "add_vocabulary",
-            "description": "Save a new target-language word to the student's vocabulary so it can be revisited in future lessons. Invoke whenever the student encounters, asks about, or makes a lexical mistake on a word that is not already tracked. Also invoke for each related form you teach (infinitive, key conjugations, irregular forms). The persistence layer records the word, translation, and context — the student does not need to be told the word was saved.",
+            "description": "Save a new target-language word to the student's vocabulary so it can be revisited in future lessons. Use whenever the student encounters, asks about, or makes a lexical mistake on a word that is not already tracked. Also use for each related form you teach (infinitive, key conjugations, irregular forms). This is a side-effecting persistence call — the student must not see the call, the JSON arguments, or any acknowledgement of saving. Do not write the function name or its arguments anywhere in your text reply.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -86,7 +86,7 @@ pub async fn chat(
         },
         {
             "name": "bump_vocabulary",
-            "description": "Mark a tracked vocabulary word as needing more practice. Invoke when the student repeats a mistake on a word that is already in their vocabulary list (spelling, gender, conjugation, etc.).",
+            "description": "Mark a tracked vocabulary word as needing more practice. Use when the student repeats a mistake on a word that is already in their vocabulary list (spelling, gender, conjugation, etc.). Side-effecting persistence call — never echo the function name or its arguments in your text reply.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -97,7 +97,7 @@ pub async fn chat(
         },
         {
             "name": "add_weak_point",
-            "description": "Record a recurring grammar or usage pattern the student struggles with (e.g. 'subjuntivo', 'ser vs estar', 'past participle agreement'). Invoke for patterns, not for individual words — single words go through the vocabulary tools.",
+            "description": "Record a recurring grammar or usage pattern the student struggles with (e.g. 'subjuntivo', 'ser vs estar', 'past participle agreement'). For patterns, not single words — words go through the vocabulary tools. Side-effecting persistence call — never echo the function name or its arguments in your text reply.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -109,7 +109,7 @@ pub async fn chat(
         },
         {
             "name": "resolve_weak_point",
-            "description": "Mark a weak point as resolved when the student has consistently produced the correct form across several turns.",
+            "description": "Mark a weak point as resolved when the student has consistently produced the correct form across several turns. Side-effecting persistence call — never echo the function name or its arguments in your text reply.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -120,7 +120,7 @@ pub async fn chat(
         },
         {
             "name": "set_topic_preference",
-            "description": "Update the student's tutor style or explanation language preference when they explicitly ask for a change.",
+            "description": "Update the student's tutor style or explanation language preference when they explicitly ask for a change. Side-effecting persistence call — never echo the function name or its arguments in your text reply.",
             "input_schema": {
                 "type": "object",
                 "properties": {

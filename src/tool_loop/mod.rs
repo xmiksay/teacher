@@ -42,6 +42,129 @@ fn strip_think_blocks(text: &str) -> String {
     result.trim().to_string()
 }
 
+const TOOL_NAMES: &[&str] = &[
+    "add_vocabulary",
+    "bump_vocabulary",
+    "add_weak_point",
+    "resolve_weak_point",
+    "set_topic_preference",
+];
+
+/// Find the matching closing `}` for the `{` at `start`, respecting nesting and JSON strings.
+fn find_json_object_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if start >= bytes.len() || bytes[start] != b'{' {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escape { escape = false; }
+            else if b == b'\\' { escape = true; }
+            else if b == b'"' { in_string = false; }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 { return Some(i + 1); }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Strip text-embedded tool-call syntax like `Add_vocabulary: {...}` from `text`,
+/// returning the cleaned text and any successfully-parsed calls. Used to:
+/// 1. recover real tool calls from models that leak them into `content`
+/// 2. sanitize historical messages so the leak doesn't feed back into future turns
+pub(crate) fn extract_text_tool_calls(text: &str) -> (String, Vec<(String, serde_json::Value)>) {
+    let mut calls = Vec::new();
+    let mut cleaned = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let lower = text.to_lowercase();
+
+    while cursor < text.len() {
+        let mut best: Option<(usize, usize, &'static str)> = None;
+        for name in TOOL_NAMES {
+            if let Some(rel) = lower[cursor..].find(name) {
+                let abs = cursor + rel;
+                let after = abs + name.len();
+                let next = text[after..].chars().next();
+                let separator_ok = matches!(next, Some(':') | Some('(') | Some('{'))
+                    || matches!(next, Some(c) if c.is_whitespace());
+                if !separator_ok { continue; }
+                if best.map_or(true, |(b, _, _)| abs < b) {
+                    best = Some((abs, after, name));
+                }
+            }
+        }
+
+        let Some((start, after, name)) = best else {
+            cleaned.push_str(&text[cursor..]);
+            break;
+        };
+
+        let rest_after = &text[after..];
+        let mut probe = after + (rest_after.len() - rest_after.trim_start().len());
+        match text[probe..].chars().next() {
+            Some(':') | Some('(') => probe += 1,
+            _ => {}
+        }
+        let after_sep = &text[probe..];
+        probe += after_sep.len() - after_sep.trim_start().len();
+
+        let Some(brace_pos) = text[probe..].find('{') else {
+            cleaned.push_str(&text[cursor..after]);
+            cursor = after;
+            continue;
+        };
+        let json_start = probe + brace_pos;
+
+        let Some(json_end) = find_json_object_end(text, json_start) else {
+            cleaned.push_str(&text[cursor..after]);
+            cursor = after;
+            continue;
+        };
+
+        let json_str = &text[json_start..json_end];
+        let parsed = serde_json::from_str::<serde_json::Value>(json_str).ok();
+
+        let mut tail = json_end;
+        if text[tail..].starts_with(')') { tail += 1; }
+        let line_tail = &text[tail..];
+        let inline_ws = line_tail.chars().take_while(|c| c.is_whitespace() && *c != '\n').count();
+        tail += inline_ws;
+        if text[tail..].starts_with('\n') { tail += 1; }
+
+        cleaned.push_str(&text[cursor..start]);
+        while cleaned.ends_with('`') || cleaned.ends_with(' ') || cleaned.ends_with('*') {
+            cleaned.pop();
+        }
+        if let Some(input) = parsed {
+            tracing::info!("Recovered text-embedded tool call: {name}({input})");
+            calls.push((name.to_string(), input));
+        } else {
+            tracing::warn!("Stripped malformed text-embedded tool call: {name} {json_str}");
+        }
+        cursor = tail;
+    }
+
+    (cleaned.trim().to_string(), calls)
+}
+
+/// Sanitize a message's text content (used for both fresh replies and history)
+/// so leaked tool-call syntax never enters or re-enters the conversation.
+fn sanitize_message_text(text: &str) -> String {
+    let (cleaned, _) = extract_text_tool_calls(text);
+    cleaned
+}
+
 /// Run the tool loop until the LLM returns a non-empty text response.
 pub async fn run(
     state: &AppState,
@@ -52,7 +175,22 @@ pub async fn run(
     lesson_id: Option<Uuid>,
 ) -> anyhow::Result<String> {
     let client = &state.http_client;
-    let mut conversation = messages;
+
+    // Sanitize incoming history: strip tool-call syntax that earlier broken turns
+    // may have leaked into persisted assistant messages, so it doesn't prime the
+    // model to mirror it again.
+    let mut conversation: Vec<serde_json::Value> = messages
+        .into_iter()
+        .map(|mut m| {
+            if m.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                if let Some(s) = m.get("content").and_then(|c| c.as_str()) {
+                    let cleaned = sanitize_message_text(s);
+                    m["content"] = serde_json::Value::String(cleaned);
+                }
+            }
+            m
+        })
+        .collect();
 
     loop {
         let resp = match &state.llm {
@@ -133,7 +271,8 @@ pub async fn run(
         }
 
         tracing::debug!("LLM returned text only, no tool calls");
-        let text = resp.text_parts.join("\n");
+        let raw_text = resp.text_parts.join("\n");
+        let text = sanitize_message_text(&raw_text);
         if text.is_empty() {
             // Nudge the LLM to produce a text reply.
             conversation.push(serde_json::json!({
@@ -303,14 +442,19 @@ async fn send_ollama_request(
     }
 
     let raw_content = message["content"].as_str().unwrap_or("");
-    let text_content = strip_think_blocks(raw_content);
+    let stripped = strip_think_blocks(raw_content);
+    let (text_content, recovered) = extract_text_tool_calls(&stripped);
 
     let mut text_parts = Vec::new();
     if !text_content.is_empty() {
         text_parts.push(text_content.clone());
     }
 
-    let mut tool_calls = Vec::new();
+    let mut tool_calls: Vec<ToolCall> = recovered
+        .into_iter()
+        .map(|(name, input)| ToolCall { id: format!("call_{}", Uuid::new_v4()), name, input })
+        .collect();
+
     if let Some(tcs) = message["tool_calls"].as_array() {
         for tc in tcs {
             let func = &tc["function"];
